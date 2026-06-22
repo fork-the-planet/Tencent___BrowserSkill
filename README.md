@@ -12,6 +12,8 @@
   English · <a href="README.zh-CN.md">中文</a>
 </p>
 
+https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
+
 **BrowserSkill** connects Cursor, Claude Code, Codex, OpenClaw, CodeBuddy,
 WorkBuddy, Pi, Hermes Agent, and other shell-capable AI agents to your already logged-in
 browser.
