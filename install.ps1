@@ -100,6 +100,31 @@ function Add-ToSessionPath {
     $env:PATH = "$Dir;$env:PATH"
 }
 
+# ── Git Bash (bash environment) PATH helper ──────────────────────────────────
+
+function Add-ToBashProfile {
+    param([string]$Dir)
+
+    # Convert Windows path (e.g. C:\Users\foo\.local\bin) to Git-Bash Unix-style (/c/Users/foo/.local/bin)
+    $unixPath = $Dir -replace '\\', '/'
+    if ($unixPath -match '^([A-Z]):(.*)$') {
+        $unixPath = '/' + $matches[1].ToLower() + $matches[2]
+    }
+    $bashRc = Join-Path $HOME ".bashrc"
+    $exportLine = "export PATH=""${unixPath}:`$PATH""  # bsk CLI"
+
+    if (Test-Path $bashRc) {
+        $content = Get-Content $bashRc -Raw -ErrorAction SilentlyContinue
+        if ($content -match [regex]::Escape($unixPath)) {
+            Write-Log "$unixPath is already in ~/.bashrc"
+            return
+        }
+    }
+
+    Add-Content $bashRc "`n$exportLine" -Encoding ASCII
+    Write-Log "added ${unixPath} to ~/.bashrc"
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 function Main {
@@ -145,8 +170,11 @@ function Main {
         # Add to session PATH (current shell)
         Add-ToSessionPath $InstallDir
 
-        # Add to user PATH (persistent)
+        # Add to user PATH (persistent, for PowerShell / cmd)
         Add-ToUserPath $InstallDir
+
+        # Add to Git Bash PATH (persistent, for bash-based shells / agents)
+        Add-ToBashProfile $InstallDir
 
         # Verify
         $bskPath = Join-Path $InstallDir "bsk.exe"
@@ -159,7 +187,7 @@ function Main {
 
         Write-Log "done"
         Write-Host ""
-        Write-Host "Open a new PowerShell window for PATH changes to take full effect."
+        Write-Host "Open a new terminal (PowerShell / Git Bash) for PATH changes to take full effect."
     }
     finally {
         Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
