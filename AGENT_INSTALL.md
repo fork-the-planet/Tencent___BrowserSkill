@@ -6,10 +6,19 @@ extension yourself (Step 3 is the user's job).
 
 ## 1. Install the CLI and skill
 
-Run the install command from [`README.md`](README.md) (macOS/Linux):
+Run the install command from [`README.md`](README.md):
+
+**macOS / Linux:**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+bsk install-skill --yes
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
 bsk install-skill --yes
 ```
 

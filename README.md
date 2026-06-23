@@ -77,9 +77,11 @@ Install the CLI, then install the extension from the [Chrome Web Store](https://
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
 ```
 
-**Windows**: download `bsk-v<version>-x86_64-pc-windows-msvc.zip` from the
-[latest CLI release](https://github.com/Tencent/BrowserSkill/releases/latest)
-and add the extracted `bsk.exe` to your `PATH`.
+**Windows** (PowerShell — installs to `~/.local/bin`):
+
+```powershell
+irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
+```
 
 Verify the binary:
 
