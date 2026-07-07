@@ -27,6 +27,9 @@ import type {
   ConsoleStackFrame,
   JavaScriptDialogInfo,
   JavaScriptDialogType,
+  NetworkEntry,
+  NetworkEntryKind,
+  NetworkResult,
 } from "@/transport/types";
 
 /**
@@ -87,6 +90,9 @@ const MAX_DIALOG_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_BUFFER = 200;
 const MAX_CONSOLE_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_STACK_FRAMES = 20;
+const MAX_NETWORK_BUFFER = 200;
+const MAX_NETWORK_FIELD_LENGTH = 4096;
+const MAX_NETWORK_REQUEST_META = 1024;
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -97,6 +103,15 @@ interface ParsedDialogOpening {
 }
 
 interface ParsedConsoleEntry extends Omit<ConsoleEntry, "sequence"> {}
+
+interface ParsedNetworkEntry extends Omit<NetworkEntry, "sequence"> {}
+
+/** Request metadata remembered from `requestWillBeSent`, keyed by requestId. */
+interface NetworkRequestMeta {
+  url: string;
+  method?: string;
+  resourceType?: string;
+}
 
 /**
  * Wrapper around `chrome.debugger` that owns the "attach once per
@@ -112,15 +127,21 @@ export class ChromiumCdp {
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
   private readonly consoleSequences = new Map<number, number>();
   private readonly consoleDomainsAttemptedTabs = new Set<number>();
+  private readonly networkBuffers = new Map<number, NetworkEntry[]>();
+  private readonly networkSequences = new Map<number, number>();
+  private readonly networkDomainsAttemptedTabs = new Set<number>();
+  private readonly networkRequestMeta = new Map<string, NetworkRequestMeta>();
   private detachSubscription: { dispose(): void } | null = null;
   private dialogSubscription: { dispose(): void } | null = null;
   private consoleSubscription: { dispose(): void } | null = null;
+  private networkSubscription: { dispose(): void } | null = null;
 
   constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
     this.api = api;
     this.bindAutoDetach();
     this.bindDialogHandler();
     this.bindConsoleHandler();
+    this.bindNetworkHandler();
   }
 
   /** Attach to `tabId` if we haven't already in this driver. */
@@ -135,6 +156,7 @@ export class ChromiumCdp {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       await this.enablePageDomain(tabId);
       await this.enableConsoleDomains(tabId);
+      await this.enableNetworkDomains(tabId);
       this.attachedTabs.add(tabId);
     })()
       .catch((err) => {
@@ -216,6 +238,44 @@ export class ChromiumCdp {
     };
   }
 
+  /** Ensure CDP domains for network capture are enabled for this tab. */
+  async ensureNetworkCapture(tabId: number): Promise<void> {
+    if (!this.attachedTabs.has(tabId)) {
+      await this.ensureAttached(tabId);
+      return;
+    }
+    await this.enableNetworkDomains(tabId);
+  }
+
+  /** Network entries observed on `tabId`, bounded for agent context safety. */
+  networkEntriesSince(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+  ): NetworkResult {
+    const buf = this.networkBuffers.get(tabId) ?? [];
+    const hasCursor = typeof since === "number";
+    const candidates = hasCursor
+      ? buf.filter((entry) => entry.sequence > since)
+      : buf.slice(Math.max(0, buf.length - limit));
+    const limited = hasCursor ? candidates.slice(0, limit) : candidates;
+    const entries = limited.map((entry) => projectNetworkEntry(entry, maxTextChars));
+    const lastReturned = entries.at(-1)?.sequence;
+    const nextSince = lastReturned ?? this.networkSequences.get(tabId) ?? 0;
+    const droppedEntries = (this.networkSequences.get(tabId) ?? 0) > buf.length;
+    const truncated =
+      droppedEntries ||
+      candidates.length > limited.length ||
+      entries.some((entry) => entry.truncated);
+    return {
+      tab_id: tabId,
+      entries,
+      next_since: nextSince,
+      truncated,
+    };
+  }
+
   /** Detach if attached; never throws. */
   async detach(tabId: number): Promise<void> {
     this.attachInFlight.delete(tabId);
@@ -223,6 +283,7 @@ export class ChromiumCdp {
     this.attachedTabs.delete(tabId);
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
+    this.clearNetworkState(tabId);
     try {
       await this.api.detach({ tabId });
     } catch (err) {
@@ -265,6 +326,10 @@ export class ChromiumCdp {
     this.consoleBuffers.clear();
     this.consoleSequences.clear();
     this.consoleDomainsAttemptedTabs.clear();
+    this.networkBuffers.clear();
+    this.networkSequences.clear();
+    this.networkDomainsAttemptedTabs.clear();
+    this.networkRequestMeta.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -289,6 +354,16 @@ export class ChromiumCdp {
       } catch (err) {
         console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
       }
+    }
+  }
+
+  private async enableNetworkDomains(tabId: number): Promise<void> {
+    if (this.networkDomainsAttemptedTabs.has(tabId)) return;
+    this.networkDomainsAttemptedTabs.add(tabId);
+    try {
+      await this.api.sendCommand({ tabId }, "Network.enable", {});
+    } catch (err) {
+      console.debug("[bsk cdp] network domain enable failed", { tabId, err });
     }
   }
 
@@ -386,6 +461,65 @@ export class ChromiumCdp {
     this.consoleDomainsAttemptedTabs.delete(tabId);
   }
 
+  private bindNetworkHandler(): void {
+    if (this.networkSubscription) return;
+    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== "number") return;
+      switch (method) {
+        case "Network.requestWillBeSent":
+          this.rememberNetworkRequest(params);
+          break;
+        case "Network.responseReceived":
+          this.appendNetwork(tabId, parseNetworkResponse(this.networkRequestMeta, params));
+          break;
+        case "Network.loadingFailed":
+          this.appendNetwork(tabId, parseNetworkFailure(this.networkRequestMeta, params));
+          break;
+      }
+    };
+    this.api.onEvent.addListener(listener);
+    this.networkSubscription = {
+      dispose: () => this.api.onEvent.removeListener(listener),
+    };
+  }
+
+  private appendNetwork(tabId: number, entry: ParsedNetworkEntry | null): void {
+    if (!entry) return;
+    const sequence = (this.networkSequences.get(tabId) ?? 0) + 1;
+    this.networkSequences.set(tabId, sequence);
+    const buf = this.networkBuffers.get(tabId) ?? [];
+    buf.push({ ...entry, sequence });
+    while (buf.length > MAX_NETWORK_BUFFER) {
+      buf.shift();
+    }
+    this.networkBuffers.set(tabId, buf);
+  }
+
+  /** Remember `requestWillBeSent` metadata so responses/failures can be attributed. */
+  private rememberNetworkRequest(params: unknown): void {
+    const raw = (params ?? {}) as Record<string, unknown>;
+    const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+    const request = (raw.request ?? {}) as Record<string, unknown>;
+    if (!id || typeof request.url !== "string") return;
+    this.networkRequestMeta.set(id, {
+      url: request.url,
+      method: typeof request.method === "string" ? request.method : undefined,
+      resourceType: typeof raw.type === "string" ? raw.type : undefined,
+    });
+    while (this.networkRequestMeta.size > MAX_NETWORK_REQUEST_META) {
+      const oldest = this.networkRequestMeta.keys().next().value;
+      if (oldest === undefined) break;
+      this.networkRequestMeta.delete(oldest);
+    }
+  }
+
+  private clearNetworkState(tabId: number): void {
+    this.networkBuffers.delete(tabId);
+    this.networkSequences.delete(tabId);
+    this.networkDomainsAttemptedTabs.delete(tabId);
+  }
+
   private bindAutoDetach(): void {
     if (this.detachSubscription) return;
     const listener = (source: chrome.debugger.Debuggee, _reason: string) => {
@@ -395,6 +529,7 @@ export class ChromiumCdp {
         this.tabOwners.delete(source.tabId);
         this.clearDialogState(source.tabId);
         this.clearConsoleState(source.tabId);
+        this.clearNetworkState(source.tabId);
       }
     };
     this.api.onDetach.addListener(listener);
@@ -411,6 +546,8 @@ export class ChromiumCdp {
     this.dialogSubscription = null;
     this.consoleSubscription?.dispose();
     this.consoleSubscription = null;
+    this.networkSubscription?.dispose();
+    this.networkSubscription = null;
   }
 
   /** Detach tabs only when no other live session has claimed them. */
@@ -602,6 +739,109 @@ function truncateConsoleText(
 function truncateOptionalConsoleField(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return truncateConsoleText(value, MAX_CONSOLE_FIELD_LENGTH).text;
+}
+
+function parseNetworkResponse(
+  meta: Map<string, NetworkRequestMeta>,
+  params: unknown,
+): ParsedNetworkEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+  const response = (raw.response ?? {}) as Record<string, unknown>;
+  const info = id ? meta.get(id) : undefined;
+  const url = typeof response.url === "string" ? response.url : info?.url;
+  if (!url) return null;
+  return makeNetworkEntry({
+    kind: "response",
+    method: info?.method,
+    url,
+    status: typeof response.status === "number" ? response.status : undefined,
+    status_text: typeof response.statusText === "string" ? response.statusText : undefined,
+    mime_type: typeof response.mimeType === "string" ? response.mimeType : undefined,
+    resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+  });
+}
+
+function parseNetworkFailure(
+  meta: Map<string, NetworkRequestMeta>,
+  params: unknown,
+): ParsedNetworkEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+  const info = id ? meta.get(id) : undefined;
+  return makeNetworkEntry({
+    kind: "failure",
+    method: info?.method,
+    url: info?.url ?? "(unknown)",
+    error_text: typeof raw.errorText === "string" ? raw.errorText : undefined,
+    resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+  });
+}
+
+function makeNetworkEntry(input: {
+  kind: NetworkEntryKind;
+  method?: string;
+  url: string;
+  status?: number;
+  status_text?: string;
+  mime_type?: string;
+  resource_type?: string;
+  error_text?: string;
+  timestamp?: number;
+}): ParsedNetworkEntry {
+  const projectedUrl = truncateNetworkText(input.url, MAX_NETWORK_FIELD_LENGTH);
+  const projectedError =
+    input.error_text !== undefined
+      ? truncateNetworkText(input.error_text, MAX_NETWORK_FIELD_LENGTH)
+      : undefined;
+  return {
+    kind: input.kind,
+    method: input.method,
+    url: projectedUrl.text,
+    status: input.status,
+    status_text: truncateOptionalNetworkField(input.status_text),
+    mime_type: truncateOptionalNetworkField(input.mime_type),
+    resource_type: input.resource_type,
+    error_text: projectedError?.text,
+    timestamp: input.timestamp,
+    truncated: projectedUrl.truncated || (projectedError?.truncated ?? false),
+  };
+}
+
+function projectNetworkEntry(entry: NetworkEntry, maxTextChars: number): NetworkEntry {
+  const projectedUrl = truncateNetworkText(entry.url, maxTextChars);
+  const projectedError =
+    entry.error_text !== undefined
+      ? truncateNetworkText(entry.error_text, maxTextChars)
+      : undefined;
+  return {
+    sequence: entry.sequence,
+    kind: entry.kind,
+    method: entry.method,
+    url: projectedUrl.text,
+    status: entry.status,
+    status_text: entry.status_text,
+    mime_type: entry.mime_type,
+    resource_type: entry.resource_type,
+    error_text: projectedError?.text,
+    timestamp: entry.timestamp,
+    truncated: entry.truncated || projectedUrl.truncated || (projectedError?.truncated ?? false),
+  };
+}
+
+function truncateNetworkText(
+  value: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (value.length <= maxChars) return { text: value, truncated: false };
+  return { text: value.slice(0, maxChars), truncated: true };
+}
+
+function truncateOptionalNetworkField(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return truncateNetworkText(value, MAX_NETWORK_FIELD_LENGTH).text;
 }
 
 function normalizeError(err: unknown): Error {

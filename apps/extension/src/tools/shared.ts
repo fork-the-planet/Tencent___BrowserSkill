@@ -9,7 +9,12 @@
 import type { DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
-import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
+import type {
+  ConsoleResult,
+  JavaScriptDialogInfo,
+  NetworkResult,
+  RpcError,
+} from "@/transport/types";
 import { rpcError } from "./errors";
 
 /**
@@ -53,6 +58,13 @@ export interface CdpRunner {
     maxTextChars: number,
     includeStack: boolean,
   ): ConsoleResult;
+  ensureNetworkCapture?(tabId: number): Promise<void>;
+  networkEntriesSince?(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+  ): NetworkResult;
 }
 
 /**

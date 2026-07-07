@@ -10,6 +10,7 @@ import type {
   NavigateBackParams,
   NavigateForwardParams,
   NavigateParams,
+  NetworkParams,
   PressParams,
   ProtocolFrame,
   ReloadParams,
@@ -33,6 +34,7 @@ import {
   handleNavigateForward,
   handleReload,
 } from "./navigation";
+import { handleNetwork } from "./network";
 import {
   type CdpRunner,
   chromeTabsCaptureApi,
@@ -283,6 +285,12 @@ export class ToolDispatcher {
         return handleConsole(
           this.sessions,
           req.params as ConsoleParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+        );
+      case "tool.network":
+        return handleNetwork(
+          this.sessions,
+          req.params as NetworkParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
         );
       case "tool.snapshot":
