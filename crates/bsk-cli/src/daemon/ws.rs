@@ -124,7 +124,8 @@ async fn handle_connection(
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
-    let callback = move |req: &Request, response: Response| -> Result<Response, ErrorResponse> {
+    #[allow(clippy::result_large_err)]
+    let callback = move |req: &Request, response: Response| {
         let origin = req
             .headers()
             .get("Origin")
