@@ -47,9 +47,7 @@ async fn spawn_daemon_with_connect_wait(connect_wait: Duration) -> (daemon::Daem
 }
 
 async fn spawn_daemon_with_session_idle(session_idle: Duration) -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
 
     let mut config = DaemonConfig::new(port);
     config.session_idle = session_idle;
